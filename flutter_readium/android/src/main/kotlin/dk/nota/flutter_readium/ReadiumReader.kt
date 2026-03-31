@@ -65,6 +65,7 @@ import org.readium.r2.shared.util.http.HttpRequest
 import org.readium.r2.shared.util.http.HttpTry
 import org.readium.r2.shared.util.resource.Resource
 import org.readium.r2.shared.util.resource.TransformingContainer
+import org.readium.r2.lcp.LcpError
 import org.readium.r2.lcp.LcpService
 import org.readium.r2.lcp.auth.LcpPassphraseAuthentication
 import org.readium.r2.streamer.PublicationOpener
@@ -208,19 +209,33 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             if (_publicationOpener == null) {
                 val contentProtections = buildList {
                     val passphrase = _lcpPassphrase
+                    Log.d(TAG, "LCP: building content protections, passphrase=${if (passphrase != null) "set (${passphrase.length} chars)" else "null"}")
                     if (passphrase != null) {
                         try {
                             val lcpService = LcpService(
                                 context = context,
                                 assetRetriever = assetRetriever,
                             )
-                            val lcpAuth = LcpPassphraseAuthentication(passphrase)
-                            lcpService?.contentProtection(lcpAuth)?.let { add(it) }
+                            if (lcpService == null) {
+                                Log.w(TAG, "LCP: LcpService is null - LCP DRM will NOT be applied")
+                            } else {
+                                val lcpAuth = LcpPassphraseAuthentication(passphrase)
+                                val cp = lcpService.contentProtection(lcpAuth)
+                                if (cp == null) {
+                                    Log.w(TAG, "LCP: contentProtection() returned null")
+                                } else {
+                                    Log.d(TAG, "LCP: ContentProtection registered successfully")
+                                    add(cp)
+                                }
+                            }
                         } catch (e: Exception) {
                             Log.w(TAG, "LCP: Failed to create content protection: $e")
                         }
+                    } else {
+                        Log.w(TAG, "LCP: no passphrase set, skipping LCP content protection")
                     }
                 }
+                Log.d(TAG, "LCP: contentProtections count = ${contentProtections.size}")
                 _publicationOpener = PublicationOpener(
                     publicationParser = DefaultPublicationParser(
                         context,
@@ -489,6 +504,50 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     /**
+     * Acquires a publication from an LCP License Document (.lcpl).
+     * Downloads the encrypted epub, injects the license, and opens it.
+     */
+    private suspend fun acquireAndLoadLcpl(lcplUrl: AbsoluteUrl): Try<Publication, PublicationError> {
+        val lcpService = LcpService(context = context, assetRetriever = assetRetriever) ?: run {
+            Log.e(TAG, "acquireAndLoadLcpl: LcpService unavailable - org.readium.lcp.sdk.Lcp not found")
+            return failure(PublicationError.Unexpected(DebugError("LcpService unavailable")))
+        }
+
+        val lcplPath = android.net.Uri.parse(lcplUrl.toString()).path ?: run {
+            return failure(PublicationError.Unexpected(DebugError("Invalid lcpl path: $lcplUrl")))
+        }
+        val lcplFile = java.io.File(lcplPath)
+        if (!lcplFile.exists()) {
+            return failure(PublicationError.Unexpected(DebugError("LCPL file not found: $lcplPath")))
+        }
+
+        Log.d(TAG, "acquireAndLoadLcpl: acquiring publication from $lcplFile")
+        val acquired: LcpService.AcquiredPublication =
+            lcpService.acquirePublication(lcplFile).getOrElse { error: LcpError ->
+                Log.e(TAG, "acquireAndLoadLcpl: acquisition failed: $error")
+                return failure(PublicationError.Unexpected(DebugError("LCP acquisition failed: $error")))
+            }
+
+        Log.d(TAG, "acquireAndLoadLcpl: acquired epub at ${acquired.localFile}")
+        val epubUri = acquired.localFile.toURI().toString()
+        val epubUrl = AbsoluteUrl(epubUri) ?: run {
+            return failure(PublicationError.Unexpected(DebugError("Invalid acquired epub URL: $epubUri")))
+        }
+
+        val asset = assetRetriever.retrieve(epubUrl).getOrElse { error ->
+            Log.e(TAG, "acquireAndLoadLcpl: error retrieving acquired epub: $error")
+            return failure(PublicationError.invoke(error))
+        }
+
+        val pub = assetToPublication(asset).getOrElse { error ->
+            Log.e(TAG, "acquireAndLoadLcpl: error opening acquired epub: $error")
+            return failure(PublicationError.invoke(error))
+        }
+
+        return Try.success(pub)
+    }
+
+    /**
      * Load a publication from an AbsoluteUrl
      *
      * Note: Remember to close the publication to avoid leaks.
@@ -505,6 +564,11 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
         return withContext(Dispatchers.IO) {
             try {
+                // LCP License Documents must be acquired before opening
+                if (pubUrl.toString().endsWith(".lcpl", ignoreCase = true)) {
+                    return@withContext acquireAndLoadLcpl(pubUrl)
+                }
+
                 // TODO: should client provide mediaType to assetRetriever?
                 val asset: Asset = assetRetriever.retrieve(pubUrl)
                     .getOrElse { error: AssetRetriever.RetrieveUrlError ->
