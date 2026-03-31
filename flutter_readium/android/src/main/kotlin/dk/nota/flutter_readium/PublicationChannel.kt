@@ -78,6 +78,13 @@ internal class PublicationMethodCallHandler() :
                 return Try.success(null)
             }
 
+            "setLcpPassphrase" -> {
+                val args = arguments as List<Any?>
+                val passphrase = args[0] as String
+                ReadiumReader.setLcpPassphrase(passphrase)
+                return Try.success(null)
+            }
+
             "loadPublication" -> {
                 val args = arguments as List<Any?>
                 val pubUrlStr = args[0] as String

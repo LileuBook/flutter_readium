@@ -198,6 +198,12 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
     // TODO: implement searchInPublication
     throw UnimplementedError();
   }
+
+  @override
+  Future<void> setLcpPassphrase(String passphrase) {
+    // TODO: implement setLcpPassphrase
+    throw UnimplementedError();
+  }
 }
 
 void main() {

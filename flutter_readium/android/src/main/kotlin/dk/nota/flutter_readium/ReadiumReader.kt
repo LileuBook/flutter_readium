@@ -65,6 +65,8 @@ import org.readium.r2.shared.util.http.HttpRequest
 import org.readium.r2.shared.util.http.HttpTry
 import org.readium.r2.shared.util.resource.Resource
 import org.readium.r2.shared.util.resource.TransformingContainer
+import org.readium.r2.lcp.LcpService
+import org.readium.r2.lcp.auth.LcpPassphraseAuthentication
 import org.readium.r2.streamer.PublicationOpener
 import org.readium.r2.streamer.PublicationOpener.OpenError
 import org.readium.r2.streamer.parser.DefaultPublicationParser
@@ -173,6 +175,8 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             return _assetRetriever!!
         }
 
+    private var _lcpPassphrase: String? = null
+
     private var _publicationOpener: PublicationOpener? = null
 
     private var ttsNavigator: TTSNavigator? = null
@@ -191,12 +195,32 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     val audioPreferences: FlutterAudioPreferences
         get() = _audioPreferences
 
+    fun setLcpPassphrase(passphrase: String) {
+        _lcpPassphrase = passphrase
+        _publicationOpener = null
+    }
+
     /**
      * The PublicationFactory is used to open publications.
      */
     private val publicationOpener: PublicationOpener
         get() {
             if (_publicationOpener == null) {
+                val contentProtections = buildList {
+                    val passphrase = _lcpPassphrase
+                    if (passphrase != null) {
+                        try {
+                            val lcpService = LcpService(
+                                context = context,
+                                assetRetriever = assetRetriever,
+                            )
+                            val lcpAuth = LcpPassphraseAuthentication(passphrase)
+                            lcpService?.contentProtection(lcpAuth)?.let { add(it) }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "LCP: Failed to create content protection: $e")
+                        }
+                    }
+                }
                 _publicationOpener = PublicationOpener(
                     publicationParser = DefaultPublicationParser(
                         context,
@@ -205,6 +229,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                         // Only required if you want to support PDF files using the PDFium adapter.
                         pdfFactory = null, //PdfiumDocumentFactory(context)
                     ),
+                    contentProtections = contentProtections,
                 )
             }
 

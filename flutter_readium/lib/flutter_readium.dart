@@ -26,6 +26,10 @@ class FlutterReadium {
     return _platform.setCustomHeaders(headers);
   }
 
+  Future<void> setLcpPassphrase(String passphrase) {
+    return _platform.setLcpPassphrase(passphrase);
+  }
+
   Future<void> setLogLevel(LogLevel level) {
     return _platform.setLogLevel(level);
   }
@@ -49,7 +53,8 @@ class FlutterReadium {
     return _platform.closePublication();
   }
 
-  Stream<ReadiumReaderStatus> get onReaderStatusChanged => _platform.onReaderStatusChanged;
+  Stream<ReadiumReaderStatus> get onReaderStatusChanged =>
+      _platform.onReaderStatusChanged;
 
   Stream<Locator> get onTextLocatorChanged {
     return _platform.onTextLocatorChanged;
@@ -79,15 +84,22 @@ class FlutterReadium {
     return _platform.skipToPrevious();
   }
 
-  Future<void> setEPUBPreferences(EPUBPreferences preferences) => _platform.setEPUBPreferences(preferences);
+  Future<void> setEPUBPreferences(EPUBPreferences preferences) =>
+      _platform.setEPUBPreferences(preferences);
 
-  Future<void> applyDecorations(String id, List<ReaderDecoration> decorations) =>
-      _platform.applyDecorations(id, decorations);
+  Future<void> applyDecorations(
+    String id,
+    List<ReaderDecoration> decorations,
+  ) => _platform.applyDecorations(id, decorations);
 
-  Future<void> ttsEnable(TTSPreferences? preferences) => _platform.ttsEnable(preferences);
-  Future<void> ttsSetPreferences(TTSPreferences preferences) => _platform.ttsSetPreferences(preferences);
-  Future<void> setDecorationStyle(ReaderDecorationStyle? utteranceDecoration, ReaderDecorationStyle? rangeDecoration) =>
-      _platform.setDecorationStyle(utteranceDecoration, rangeDecoration);
+  Future<void> ttsEnable(TTSPreferences? preferences) =>
+      _platform.ttsEnable(preferences);
+  Future<void> ttsSetPreferences(TTSPreferences preferences) =>
+      _platform.ttsSetPreferences(preferences);
+  Future<void> setDecorationStyle(
+    ReaderDecorationStyle? utteranceDecoration,
+    ReaderDecorationStyle? rangeDecoration,
+  ) => _platform.setDecorationStyle(utteranceDecoration, rangeDecoration);
   Future<List<ReaderTTSVoice>> ttsGetAvailableVoices() async {
     await ReaderTTSVoiceUtils.ensureReadiumVoiceDataLoaded();
 
@@ -107,7 +119,8 @@ class FlutterReadium {
 
   Future<void> audioEnable({AudioPreferences? prefs, Locator? fromLocator}) =>
       _platform.audioEnable(prefs: prefs, fromLocator: fromLocator);
-  Future<void> audioSetPreferences(AudioPreferences prefs) => _platform.audioSetPreferences(prefs);
+  Future<void> audioSetPreferences(AudioPreferences prefs) =>
+      _platform.audioSetPreferences(prefs);
   Future<void> audioSeekBy(Duration offset) => _platform.audioSeekBy(offset);
 
   Future<bool> goByLink(final Link link, final Publication pub) async {
@@ -124,10 +137,15 @@ class FlutterReadium {
     return goToLocator(locator);
   }
 
-  Future<bool> toPhysicalPageIndex(final String index, final Publication pub) async {
+  Future<bool> toPhysicalPageIndex(
+    final String index,
+    final Publication pub,
+  ) async {
     final pageIndex = index.toLowerCase();
     final pageList = pub.pageList;
-    final pageLink = pageList.firstWhereOrNull((final link) => link.title?.toLowerCase() == pageIndex);
+    final pageLink = pageList.firstWhereOrNull(
+      (final link) => link.title?.toLowerCase() == pageIndex,
+    );
     if (pageLink == null) {
       throw const ReadiumException('Page link not found');
     }
