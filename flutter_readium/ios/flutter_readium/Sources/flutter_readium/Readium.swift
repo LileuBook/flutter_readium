@@ -30,6 +30,7 @@ final class Readium : DefaultHTTPClientDelegate {
   lazy var assetRetriever: AssetRetriever? = nil
   lazy var publicationOpener: PublicationOpener? = nil
   var additionalHeaders = Dictionary<String, String>()
+  var lcpPassphrase: String? = nil
 
   func setupWithHeaders(headers: [String: String]?) {
     self.httpClient = DefaultHTTPClient(
@@ -52,6 +53,11 @@ final class Readium : DefaultHTTPClientDelegate {
 
   func setAdditionalHeaders(_ headers: [String: String]) -> Void {
     self.additionalHeaders = headers
+  }
+
+  func setLcpPassphrase(_ passphrase: String) -> Void {
+    self.lcpPassphrase = passphrase
+    Log.readium.debug("LCP passphrase set (len=\(passphrase.count))")
   }
 
   //--- MARK: DefaultHTTPClientDelegate

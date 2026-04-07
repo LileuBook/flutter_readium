@@ -466,6 +466,14 @@ class EpubReaderFragment : VisualReaderFragment(), EpubNavigatorFragment.Listene
             return
         }
 
+        if (ReadiumReader.isCurrentPublicationRestricted()) {
+            val message =
+                "The provided publication is restricted. Check that any DRM was properly unlocked using a Content Protection."
+            Log.e(TAG, "::attachNavigator() - $instance - $message")
+            ReadiumReader.reportRestrictedPublicationError(message)
+            return
+        }
+
         val preferences = model.preferences ?: EpubPreferences()
         model.preferences = preferences
         val navigatorFactory = model.navigatorFactory!!
@@ -492,12 +500,20 @@ class EpubReaderFragment : VisualReaderFragment(), EpubNavigatorFragment.Listene
         ) as EpubNavigatorFragment
 
         Log.d(TAG, "::attachNavigator - $instance - add fragment")
-        childFragmentManager.commitNow {
-            add(
-                R.id.fragment_reader_container,
-                epubNavigator,
-                NAVIGATOR_FRAGMENT_TAG,
-            )
+        try {
+            childFragmentManager.commitNow {
+                add(
+                    R.id.fragment_reader_container,
+                    epubNavigator,
+                    NAVIGATOR_FRAGMENT_TAG,
+                )
+            }
+        } catch (error: IllegalArgumentException) {
+            val message =
+                "The provided publication is restricted. Check that any DRM was properly unlocked using a Content Protection."
+            Log.e(TAG, "::attachNavigator() - $instance - failed to attach navigator: $error")
+            ReadiumReader.reportRestrictedPublicationError(message)
+            return
         }
 
         (epubNavigator as OverflowableNavigator).apply {

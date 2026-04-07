@@ -22,12 +22,16 @@ A new Flutter plugin project.
   s.dependency 'ReadiumNavigator', '~> 3.7.0'
   s.dependency 'ReadiumOPDS', '~> 3.7.0'
   s.dependency 'ReadiumAdapterGCDWebServer', '~> 3.7.0'
-  # s.dependency 'ReadiumLCP', '~> 3.5.0'
+  s.dependency 'ReadiumLCP', '~> 3.7.0'
 
   s.platform = :ios, '15.0'
 
   # Flutter.framework does not contain a i386 slice.
-  s.pod_target_xcconfig = { 'DEFINES_MODULE' => 'YES', 'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386' }
+  s.pod_target_xcconfig = {
+    'DEFINES_MODULE' => 'YES',
+    'EXCLUDED_ARCHS[sdk=iphonesimulator*]' => 'i386',
+    'SWIFT_ACTIVE_COMPILATION_CONDITIONS' => '$(inherited) LCP'
+  }
   s.swift_version = '5.0'
 
   # If your plugin requires a privacy manifest, for example if it uses any

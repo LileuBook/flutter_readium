@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import androidx.fragment.app.FragmentManager
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryOwner
+import dk.nota.flutter_readium.events.ReadiumErrorEventChannel
 import dk.nota.flutter_readium.events.ReadiumReaderStatus
 import dk.nota.flutter_readium.events.ReadiumReaderStatusEventChannel
 import dk.nota.flutter_readium.events.TextLocatorEventChannel
@@ -48,6 +49,7 @@ import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.LocatorCollection
 import org.readium.r2.shared.publication.Publication
 import org.readium.r2.shared.publication.html.cssSelector
+import org.readium.r2.shared.publication.services.isRestricted
 import org.readium.r2.shared.publication.services.search.SearchService
 import org.readium.r2.shared.publication.services.search.search
 import org.readium.r2.shared.util.AbsoluteUrl
@@ -72,6 +74,8 @@ import org.readium.r2.streamer.PublicationOpener
 import org.readium.r2.streamer.PublicationOpener.OpenError
 import org.readium.r2.streamer.parser.DefaultPublicationParser
 import java.lang.ref.WeakReference
+import java.security.MessageDigest
+import org.json.JSONObject
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
 
@@ -105,6 +109,8 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     private var timedBasedStateEventChannel: TimedBasedStateEventChannel? = null
 
     private var textLocatorEventChannel: TextLocatorEventChannel? = null
+
+    private var readiumErrorEventChannel: ReadiumErrorEventChannel? = null
 
     private var readiumReaderStatusEventChannel: ReadiumReaderStatusEventChannel? = null
 
@@ -199,6 +205,12 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     fun setLcpPassphrase(passphrase: String) {
         _lcpPassphrase = passphrase
         _publicationOpener = null
+        Log.d(TAG, "LCP: passphrase updated (len=${passphrase.length}, fp=${fingerprint(passphrase)})")
+    }
+
+    private fun fingerprint(value: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(value.toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { "%02x".format(it) }.take(8)
     }
 
     /**
@@ -259,6 +271,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         timedBasedStateEventChannel = TimedBasedStateEventChannel(messenger)
 
         textLocatorEventChannel = TextLocatorEventChannel(messenger)
+        readiumErrorEventChannel = ReadiumErrorEventChannel(messenger)
         readiumReaderStatusEventChannel = ReadiumReaderStatusEventChannel(messenger)
 
         // store weak ref only
@@ -413,8 +426,11 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         textLocatorEventChannel?.dispose()
         textLocatorEventChannel = null
 
+        readiumErrorEventChannel?.dispose()
+        readiumErrorEventChannel = null
+
         readiumReaderStatusEventChannel?.dispose()
-        textLocatorEventChannel = null
+        readiumReaderStatusEventChannel = null
 
         jobs.forEach { it.cancel() }
         jobs.clear()
@@ -627,6 +643,19 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
         val pub = loadPublication(pubUrl).getOrElse { e -> return failure(e) }
 
+        if (isPublicationRestricted(pub) || isPublicationRestrictedByProbe(pub)) {
+            val message =
+                "The provided publication is restricted. Check that any DRM was properly unlocked using a Content Protection."
+            Log.e(TAG, "openPublication: $message")
+            sendErrorEvent(
+                message = message,
+                code = "incorrectCredentials",
+                data = pubUrl.toString()
+            )
+            pub.close()
+            return failure(PublicationError.IncorrectCredentials(message))
+        }
+
         _currentPublication = pub
         currentPublicationUrl = pubUrl.toString()
 
@@ -717,7 +746,67 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
     override fun onTimebasedPlaybackFailure(error: PublicationError) {
         Log.d(TAG, ":onTimebasedPlaybackFailure $error")
-        // TODO: Notify client
+        sendErrorEvent(
+            message = error.message,
+            code = "timebasedPlaybackFailure",
+            data = error.toString()
+        )
+    }
+
+    fun isCurrentPublicationRestricted(): Boolean {
+        val publication = currentPublication ?: return false
+        return isPublicationRestricted(publication)
+    }
+
+    fun reportRestrictedPublicationError(
+        message: String = "The provided publication is restricted. Check that any DRM was properly unlocked using a Content Protection."
+    ) {
+        sendErrorEvent(
+            message = message,
+            code = "incorrectCredentials",
+            data = currentPublicationUrl
+        )
+    }
+
+    private fun isPublicationRestricted(publication: Publication): Boolean {
+        // Readium 3: restriction comes from ContentProtectionService (LCP license missing / locked).
+        // Older reflection on Publication never matched, so openPublication wrongly "succeeded"
+        // while NavigatorFragment still refused to render (blank EPUB).
+        return publication.isRestricted
+    }
+
+    private suspend fun isPublicationRestrictedByProbe(publication: Publication): Boolean {
+        val firstReadingOrderLink = publication.readingOrder.firstOrNull() ?: return false
+
+        return try {
+            val firstResource = publication.get(firstReadingOrderLink) ?: run {
+                Log.e(TAG, "openPublication: restricted probe missing first reading-order resource")
+                return true
+            }
+
+            val probe = firstResource.read(0L..0L)
+            probe.getOrElse { error ->
+                Log.e(TAG, "openPublication: restricted probe read failed: $error")
+                return true
+            }
+            false
+        } catch (error: Exception) {
+            Log.e(TAG, "openPublication: restricted probe threw exception: $error")
+            true
+        }
+    }
+
+    private fun sendErrorEvent(message: String, code: String? = null, data: Any? = null) {
+        val payload = JSONObject().apply {
+            put("message", message)
+            if (code != null) {
+                put("code", code)
+            }
+            if (data != null) {
+                put("data", data.toString())
+            }
+        }
+        readiumErrorEventChannel?.sendEvent(payload.toString())
     }
 
     @OptIn(InternalReadiumApi::class)

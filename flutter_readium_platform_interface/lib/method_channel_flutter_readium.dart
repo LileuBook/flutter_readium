@@ -81,7 +81,7 @@ class MethodChannelFlutterReadium extends FlutterReadiumPlatform {
           return ReadiumReaderStatus.fromString(json.decode(event) as String) ??
               ReadiumReaderStatus.fromString(event) ??
               ReadiumReaderStatus.error;
-        } catch (e) {
+        } on Object catch (e) {
           debugPrint('Error parsing reader status event: $e');
           return ReadiumReaderStatus.error;
         }
@@ -92,12 +92,40 @@ class MethodChannelFlutterReadium extends FlutterReadiumPlatform {
 
   @override
   Stream<ReadiumError> get onErrorEvent {
-    _onErrorEvent ??= errorEventChannel.receiveBroadcastStream().map((
-      dynamic event,
-    ) {
-      final errorEvent = json.decode(event) as ReadiumError;
-      return errorEvent;
-    });
+    _onErrorEvent ??= errorEventChannel
+        .receiveBroadcastStream()
+        .map((dynamic event) {
+          if (event is String) {
+            return ReadiumError.fromJson(
+              json.decode(event) as Map<String, dynamic>,
+            );
+          }
+
+          if (event is Map) {
+            return ReadiumError.fromJson(Map<String, dynamic>.from(event));
+          }
+
+          return ReadiumError(
+            'Unexpected Readium error payload type: ${event.runtimeType}',
+            code: 'unexpected_error_payload',
+            data: event,
+          );
+        })
+        .handleError((Object error, StackTrace stackTrace) {
+          if (error is MissingPluginException) {
+            debugPrint(
+              'FlutterReadium error event channel is unavailable on this platform/build.',
+            );
+            return;
+          }
+          if (error is PlatformException) {
+            debugPrint(
+              'FlutterReadium error event channel failed: ${error.message ?? error.code}',
+            );
+            return;
+          }
+          throw error;
+        });
     return _onErrorEvent!;
   }
 

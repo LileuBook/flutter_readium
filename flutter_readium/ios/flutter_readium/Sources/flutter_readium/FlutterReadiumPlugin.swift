@@ -163,6 +163,16 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
       }
       sharedReadium.setAdditionalHeaders(httpHeaders)
       result(nil)
+    case "setLcpPassphrase":
+      let args = call.arguments as! [Any?]
+      guard let passphrase = args.first as? String, !passphrase.isEmpty else {
+        return result(FlutterError.init(
+          code: "InvalidArgument",
+          message: "Invalid LCP passphrase",
+          details: nil))
+      }
+      sharedReadium.setLcpPassphrase(passphrase)
+      result(nil)
     case "ttsEnable":
       Task.detached(priority: .high) {
         do {

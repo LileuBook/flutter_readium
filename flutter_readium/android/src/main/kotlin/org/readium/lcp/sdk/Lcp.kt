@@ -48,7 +48,13 @@ class Lcp {
         else null
 
         for (hp in hashedPassphrases) {
-            val userKey = try { hexToBytes(hp) } catch (e: Exception) { continue }
+            val normalizedHex = try {
+                normalizeHashedPassphraseToHex(hp)
+            } catch (e: Exception) {
+                Log.d(TAG, "Skipping invalid hashed passphrase candidate: ${e.message}")
+                continue
+            }
+            val userKey = try { hexToBytes(normalizedHex) } catch (e: Exception) { continue }
             try {
                 // Primary check: can we decrypt the content key with this user key?
                 val contentKey = aesCbcDecrypt(userKey, encryptedContentKeyBytes)
@@ -67,7 +73,7 @@ class Lcp {
                         }
                     }
                     Log.d(TAG, "Valid passphrase found for license $licenseId")
-                    return hp
+                    return normalizedHex
                 }
             } catch (e: Exception) {
                 Log.d(TAG, "Passphrase attempt failed: ${e.message}")
@@ -127,10 +133,38 @@ class Lcp {
     }
 
     private fun hexToBytes(hex: String): ByteArray {
-        val len = hex.length
+        val normalized = hex.trim()
+        val len = normalized.length
         require(len % 2 == 0) { "Hex string must have even length" }
         return ByteArray(len / 2) { i ->
-            ((Character.digit(hex[i * 2], 16) shl 4) + Character.digit(hex[i * 2 + 1], 16)).toByte()
+            val high = Character.digit(normalized[i * 2], 16)
+            val low = Character.digit(normalized[i * 2 + 1], 16)
+            require(high >= 0 && low >= 0) { "Invalid hex character in hashed passphrase" }
+            ((high shl 4) + low).toByte()
         }
+    }
+
+    private fun normalizeHashedPassphraseToHex(value: String): String {
+        val normalized = value.trim().trim('"')
+        if (normalized.isEmpty()) {
+            throw IllegalArgumentException("Empty hashed passphrase")
+        }
+
+        // Newer/expected format from Readium internals.
+        if (normalized.matches(Regex("^[0-9a-fA-F]{64}$"))) {
+            return normalized.lowercase()
+        }
+
+        // Backward compatibility: base64 representation of 32-byte hash.
+        val decodedBase64 = try {
+            Base64.decode(normalized, Base64.DEFAULT)
+        } catch (_: Exception) {
+            null
+        }
+        if (decodedBase64 != null && decodedBase64.size == 32) {
+            return decodedBase64.joinToString("") { "%02x".format(it) }
+        }
+
+        throw IllegalArgumentException("Unsupported hashed passphrase format")
     }
 }

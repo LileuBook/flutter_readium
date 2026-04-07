@@ -15,7 +15,8 @@ class ReadiumException implements Exception {
 
   static ReadiumException fromPlatformException(PlatformException ex) {
     final type = OpeningReadiumExceptionType.values.firstWhereOrNull((v) => v.name == ex.code);
-    return ReadiumException(ex.details ?? 'unknown', type: type);
+    final message = ex.message ?? ex.details ?? 'unknown';
+    return ReadiumException(message, type: type);
   }
 
   static ReadiumException fromError(Object? err) {
@@ -93,13 +94,15 @@ class ReadiumError implements Error {
 
   @override
   bool operator ==(covariant final Object other) =>
-      identical(this, other) || other is ReadiumError && other.message == message && other.code == code;
+      identical(this, other) ||
+      other is ReadiumError && other.message == message && other.code == code;
 
   @override
   int get hashCode => message.hashCode ^ code.hashCode;
 
   @override
-  String toString() => 'ReadiumError(message: $message, code: $code data: $data, stackTrace: $stackTrace)';
+  String toString() =>
+      'ReadiumError(message: $message, code: $code data: $data, stackTrace: $stackTrace)';
 
   Map<String, dynamic> toJson() => {}
     ..put('message', message)

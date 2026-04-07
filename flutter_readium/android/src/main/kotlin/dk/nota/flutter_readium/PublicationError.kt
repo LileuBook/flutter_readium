@@ -40,6 +40,9 @@ sealed class PublicationError(
     class Unavailable(message: String = "Resource unavailable") :
         PublicationError(ReadiumExceptionType.unavailable, message)
 
+    class IncorrectCredentials(message: String = "Incorrect credentials") :
+        PublicationError(ReadiumExceptionType.incorrectCredentials, message)
+
     class Unknown(message: String = "Unknown error") :
         PublicationError(ReadiumExceptionType.unknown, message)
 
