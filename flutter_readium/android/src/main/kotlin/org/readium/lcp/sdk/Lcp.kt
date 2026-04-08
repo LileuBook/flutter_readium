@@ -127,9 +127,20 @@ class Lcp {
         require(dataWithIV.size >= 16) { "Data too short to contain IV (${dataWithIV.size} bytes)" }
         val iv = dataWithIV.copyOfRange(0, 16)
         val ciphertext = dataWithIV.copyOfRange(16, dataWithIV.size)
-        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        require(ciphertext.isNotEmpty() && ciphertext.size % 16 == 0) {
+            "Ciphertext must be non-empty and a multiple of 16 bytes (got ${ciphertext.size})"
+        }
+
+        val cipher = Cipher.getInstance("AES/CBC/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        return cipher.doFinal(ciphertext)
+        val decrypted = cipher.doFinal(ciphertext)
+
+        // Padding W3C XML Encryption: apenas o ultimo byte indica o tamanho do padding.
+        // Os outros bytes de padding podem ser aleatorios (diferente do PKCS7 onde todos sao iguais).
+        val padLen = decrypted.last().toInt() and 0xFF
+        require(padLen in 1..16) { "Invalid padding length: $padLen" }
+
+        return decrypted.copyOfRange(0, decrypted.size - padLen)
     }
 
     private fun hexToBytes(hex: String): ByteArray {
