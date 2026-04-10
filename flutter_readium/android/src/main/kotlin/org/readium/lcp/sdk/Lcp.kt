@@ -56,16 +56,13 @@ class Lcp {
             }
             val userKey = try { hexToBytes(normalizedHex) } catch (e: Exception) { continue }
             try {
-                // Primary check: can we decrypt the content key with this user key?
-                val contentKey = aesCbcDecrypt(userKey, encryptedContentKeyBytes)
+                val contentKey = aesCbcDecryptAndUnpad(userKey, encryptedContentKeyBytes)
                 if (contentKey.isNotEmpty()) {
-                    // Optional secondary check: verify key_check if provided
                     if (keyCheckBytes != null) {
                         try {
-                            val decryptedCheck = aesCbcDecrypt(userKey, keyCheckBytes)
+                            val decryptedCheck = aesCbcDecryptAndUnpad(userKey, keyCheckBytes)
                             val checkStr = String(decryptedCheck, Charsets.UTF_8)
                             if (checkStr != licenseId) {
-                                // Some servers may not use exact equality; don't reject solely on mismatch
                                 Log.d(TAG, "key_check mismatch; accepting due to valid content key decryption")
                             }
                         } catch (_: Exception) {
@@ -113,34 +110,41 @@ class Lcp {
 
     /**
      * Decrypts an LCP-encrypted resource.
-     * The content key is recovered from context, then used to decrypt the resource bytes.
-     * encryptedData has the 16-byte IV prepended.
+     * Returns raw decrypted bytes **with W3C XML-Enc padding still present** so
+     * that callers ([AltoralUnlock.decryptFully] / [CbcAltoralResource]) can handle
+     * padding removal themselves (avoiding double-strip corruption).
      */
     fun decrypt(context: DRMContext, encryptedData: ByteArray): ByteArray {
         val userKey = hexToBytes(context.hashedPassphrase)
         val encryptedContentKeyBytes = Base64.decode(context.encryptedContentKey, Base64.DEFAULT)
-        val contentKey = aesCbcDecrypt(userKey, encryptedContentKeyBytes)
-        return aesCbcDecrypt(contentKey, encryptedData)
+        val contentKey = aesCbcDecryptAndUnpad(userKey, encryptedContentKeyBytes)
+        return aesCbcDecryptRaw(contentKey, encryptedData)
     }
 
-    private fun aesCbcDecrypt(key: ByteArray, dataWithIV: ByteArray): ByteArray {
+    /**
+     * Raw AES-CBC decrypt: strips the 16-byte IV but does NOT remove content padding.
+     */
+    private fun aesCbcDecryptRaw(key: ByteArray, dataWithIV: ByteArray): ByteArray {
         require(dataWithIV.size >= 16) { "Data too short to contain IV (${dataWithIV.size} bytes)" }
         val iv = dataWithIV.copyOfRange(0, 16)
         val ciphertext = dataWithIV.copyOfRange(16, dataWithIV.size)
         require(ciphertext.isNotEmpty() && ciphertext.size % 16 == 0) {
             "Ciphertext must be non-empty and a multiple of 16 bytes (got ${ciphertext.size})"
         }
-
         val cipher = Cipher.getInstance("AES/CBC/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(key, "AES"), IvParameterSpec(iv))
-        val decrypted = cipher.doFinal(ciphertext)
+        return cipher.doFinal(ciphertext)
+    }
 
-        // Padding W3C XML Encryption: apenas o ultimo byte indica o tamanho do padding.
-        // Os outros bytes de padding podem ser aleatorios (diferente do PKCS7 onde todos sao iguais).
-        val padLen = decrypted.last().toInt() and 0xFF
+    /**
+     * AES-CBC decrypt + W3C XML-Enc padding removal.
+     * Used for structural fields (content key, key_check) where the caller expects clean data.
+     */
+    private fun aesCbcDecryptAndUnpad(key: ByteArray, dataWithIV: ByteArray): ByteArray {
+        val raw = aesCbcDecryptRaw(key, dataWithIV)
+        val padLen = raw.last().toInt() and 0xFF
         require(padLen in 1..16) { "Invalid padding length: $padLen" }
-
-        return decrypted.copyOfRange(0, decrypted.size - padLen)
+        return raw.copyOfRange(0, raw.size - padLen)
     }
 
     private fun hexToBytes(hex: String): ByteArray {

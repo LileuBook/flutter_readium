@@ -1,3 +1,4 @@
+export 'drm_scheme.dart';
 export 'enums.dart';
 export 'exceptions/index.dart';
 export 'extensions/index.dart';

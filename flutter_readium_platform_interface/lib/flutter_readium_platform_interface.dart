@@ -45,6 +45,15 @@ abstract class FlutterReadiumPlatform extends PlatformInterface {
     'setLcpPassphrase(passphrase) has not been implemented.',
   );
 
+  /// Selects DRM stack and optional unlock material. Invalidates native publication openers.
+  Future<void> setDrmConfiguration({
+    required DrmScheme scheme,
+    String? passphrase,
+    Map<String, String>? extras,
+  }) => throw UnimplementedError(
+    'setDrmConfiguration() has not been implemented.',
+  );
+
   Future<void> setLogLevel(LogLevel level) =>
       throw UnimplementedError('setLogLevel() has not been implemented.');
 

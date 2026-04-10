@@ -204,6 +204,15 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
     // TODO: implement setLcpPassphrase
     throw UnimplementedError();
   }
+
+  @override
+  Future<void> setDrmConfiguration({
+    required DrmScheme scheme,
+    String? passphrase,
+    Map<String, String>? extras,
+  }) {
+    throw UnimplementedError();
+  }
 }
 
 void main() {

@@ -153,6 +153,43 @@ class MethodChannelFlutterReadium extends FlutterReadiumPlatform {
   }
 
   @override
+  Future<void> setDrmConfiguration({
+    required DrmScheme scheme,
+    String? passphrase,
+    Map<String, String>? extras,
+  }) async {
+    try {
+      await methodChannel.invokeMethod<void>('setDrmConfiguration', {
+        'scheme': scheme.nativeIndex,
+        if (passphrase != null) 'passphrase': passphrase,
+        if (extras != null && extras.isNotEmpty) 'extras': extras,
+      });
+    } on MissingPluginException {
+      // APKs built before native `setDrmConfiguration` hit the channel `else` branch and call
+      // `result.notImplemented()` → MissingPluginException.
+      if (passphrase == null) rethrow;
+      // LCP acquisition + passphrase works for standard LCPL; Altoral-only native needs a full rebuild.
+      if (scheme == DrmScheme.lcp ||
+          scheme == DrmScheme.dual ||
+          scheme == DrmScheme.altoral) {
+        debugPrint(
+          'FlutterReadium: setDrmConfiguration unavailable; using setLcpPassphrase (rebuild app for native DRM scheme / Altoral path).',
+        );
+        // Altoral/dual: preserve native drmScheme if setDrmConfiguration ran on native but Dart
+        // still failed; never downgrade to LCP-only (would cause LcpBasicProfile BAD_DECRYPT).
+        final preserveScheme =
+            scheme == DrmScheme.altoral || scheme == DrmScheme.dual;
+        await methodChannel.invokeMethod<void>('setLcpPassphrase', [
+          passphrase,
+          preserveScheme,
+        ]);
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  @override
   Future<void> setLogLevel(LogLevel level) async {
     await methodChannel.invokeMethod<void>('setLogLevel', level.index);
   }
@@ -162,6 +199,11 @@ class MethodChannelFlutterReadium extends FlutterReadiumPlatform {
     final publicationString = await methodChannel
         .invokeMethod<String>('openPublication', [pubUrl])
         .then<String>((dynamic result) => result);
+    if (kDebugMode) {
+      debugPrint(
+        'openPublication: manifest JSON length=${publicationString.length}',
+      );
+    }
     return Publication.fromJson(
       json.decode(publicationString) as Map<String, dynamic>,
     )!;

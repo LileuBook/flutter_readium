@@ -171,7 +171,27 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
           message: "Invalid LCP passphrase",
           details: nil))
       }
-      sharedReadium.setLcpPassphrase(passphrase)
+      let preserveDrmScheme =
+        args.count > 1 && (args[1] as? Bool == true || (args[1] as? NSNumber)?.boolValue == true)
+      sharedReadium.setLcpPassphrase(passphrase, preserveDrmScheme: preserveDrmScheme)
+      result(nil)
+    case "setDrmConfiguration":
+      guard let map = call.arguments as? [String: Any] else {
+        return result(FlutterError(
+          code: "InvalidArgument",
+          message: "setDrmConfiguration requires a map",
+          details: nil))
+      }
+      let scheme: Int
+      if let n = map["scheme"] as? Int {
+        scheme = n
+      } else if let n = map["scheme"] as? NSNumber {
+        scheme = n.intValue
+      } else {
+        scheme = 0
+      }
+      let passphrase = map["passphrase"] as? String
+      sharedReadium.setDrmConfiguration(scheme: scheme, passphrase: passphrase)
       result(nil)
     case "ttsEnable":
       Task.detached(priority: .high) {
@@ -571,6 +591,7 @@ extension FlutterReadiumPlugin {
       let publication = try await sharedReadium.publicationOpener!.open(
         asset: asset,
         allowUserInteraction: allowUserInteraction,
+        credentials: sharedReadium.lcpPassphrase,
         sender: sender
       ).get()
 

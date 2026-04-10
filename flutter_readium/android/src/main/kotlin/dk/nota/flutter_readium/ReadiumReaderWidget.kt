@@ -7,8 +7,7 @@ import android.util.AttributeSet
 import android.util.Log
 import android.view.View
 import android.view.ViewGroup
-import android.widget.LinearLayout
-import android.widget.LinearLayout.generateViewId
+import android.widget.FrameLayout
 import androidx.fragment.app.FragmentActivity
 import androidx.fragment.app.commitNow
 import dk.nota.flutter_readium.events.ReadiumReaderStatus
@@ -24,6 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 import org.readium.r2.navigator.epub.EpubPreferences
@@ -52,10 +52,28 @@ class ReadiumReaderWidget(
      */
     var hasSentReady = false
 
-    private val layout: ViewGroup
+    private val layout: ViewGroup = FrameLayout(context, attrs).apply {
+        // Não usar `id = …`: o construtor tem parâmetro `id: Int` (shadowing → val não reatribuível).
+        setId(View.generateViewId())
+        setBackgroundColor(Color.TRANSPARENT)
+        setPadding(0, 0, 0, 0)
+        layoutParams = ViewGroup.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+    }
 
-    private val activity
-        get() = (context as ContextWrapper).baseContext as FragmentActivity
+    private val activity: FragmentActivity
+        get() {
+            var ctx = context
+            while (ctx is ContextWrapper) {
+                if (ctx is FragmentActivity) return ctx
+                ctx = ctx.baseContext
+            }
+            throw IllegalStateException(
+                "ReadiumReaderWidget requires a FragmentActivity host but context chain is: ${context.javaClass.name}"
+            )
+        }
     private val fragmentManager
         get() = activity.supportFragmentManager
 
@@ -107,11 +125,6 @@ class ReadiumReaderWidget(
                 initPrefsMap, null
             )
         Log.d(TAG, "publication = $publication")
-
-        layout = LinearLayout(context, attrs)
-        layout.id = generateViewId()
-        layout.setBackgroundColor(Color.TRANSPARENT)
-        layout.setPadding(0, 0, 0, 0)
 
         ReadiumReader.currentReaderWidget = this
 
@@ -197,6 +210,37 @@ class ReadiumReaderWidget(
             ReadiumReader.emitReaderStatusUpdate(ReadiumReaderStatus.Ready)
 
             hasSentReady = true
+        }
+        // Alguns títulos (ex. LCP) chegam aqui antes do primeiro `onPageChanged` no canal;
+        // o snapshot pode ainda ser null — repetir e usar firstVisibleElementLocator como fallback.
+        mainScope.launch {
+            suspend fun resolveAndEmit(): Boolean {
+                var loc = ReadiumReader.epubCurrentLocatorSnapshot()
+                if (loc == null) {
+                    loc = ReadiumReader.epubFirstVisibleElementLocator()
+                }
+                if (loc == null) {
+                    return false
+                }
+                val key = "${loc.href}@${loc.locations.progression}"
+                if (lastPageLoadedKey == key) {
+                    return true
+                }
+                lastPageLoadedKey = key
+                emitOnPageChanged(0, 1, loc)
+                return true
+            }
+
+            if (resolveAndEmit()) {
+                return@launch
+            }
+            repeat(25) {
+                delay(80L)
+                if (resolveAndEmit()) {
+                    return@launch
+                }
+            }
+            Log.w(TAG, "::onVisualReaderIsReady: no initial locator after retries")
         }
     }
 

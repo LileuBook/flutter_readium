@@ -2,6 +2,8 @@
 
 package dk.nota.flutter_readium
 
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import dk.nota.flutter_readium.models.TextSearchResult
 import io.flutter.plugin.common.MethodCall
@@ -14,12 +16,16 @@ import org.json.JSONObject
 import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.r2.shared.InternalReadiumApi
 import org.readium.r2.shared.publication.Locator
+import org.readium.r2.shared.publication.Manifest
+import org.readium.r2.shared.publication.Publication
 import org.readium.r2.shared.util.Try
 import org.readium.r2.shared.util.getOrElse
 
 private const val TAG = "PublicationChannel"
 
 internal const val publicationChannelName = "dk.nota.flutter_readium/main"
+
+private val publicationMainHandler = Handler(Looper.getMainLooper())
 
 @ExperimentalCoroutinesApi
 internal class PublicationMethodCallHandler() :
@@ -30,33 +36,39 @@ internal class PublicationMethodCallHandler() :
         CoroutineScope(Dispatchers.IO).launch {
             Log.d(TAG, ":onMethodCall method:${call.method} args:${call.arguments}")
 
+            fun finishOnMain(block: () -> Unit) {
+                publicationMainHandler.post(block)
+            }
+
             try {
                 val res = handleMethodCallsQueue(
                     call.method,
                     call.arguments
                 ).getOrElse { error ->
-                    result.publicationError(call.method, error)
+                    finishOnMain { result.publicationError(call.method, error) }
                     return@launch
                 }
 
-                if (res is Unit) {
-                    result.success(null)
-                    return@launch
+                finishOnMain {
+                    when {
+                        res == null || res is Unit -> result.success(null)
+                        else -> result.success(res)
+                    }
                 }
-
-                result.success(res)
             } catch (_: NotImplementedError) {
-                result.notImplemented()
+                finishOnMain { result.notImplemented() }
             } catch (e: Exception) {
                 Log.e(TAG, "Exception: $e")
                 Log.e(TAG, "${e.stackTrace}")
 
                 // TODO: Handle unknown errors better.
-                result.error(
-                    e.javaClass.toString(),
-                    e.toString(),
-                    e.stackTraceToString()
-                )
+                finishOnMain {
+                    result.error(
+                        e.javaClass.toString(),
+                        e.toString(),
+                        e.stackTraceToString()
+                    )
+                }
             }
         }
     }
@@ -79,9 +91,20 @@ internal class PublicationMethodCallHandler() :
             }
 
             "setLcpPassphrase" -> {
-                val args = arguments as List<Any?>
+                val args = arguments as? List<Any?> ?: emptyList()
                 val passphrase = args[0] as String
-                ReadiumReader.setLcpPassphrase(passphrase)
+                val preserveDrmScheme = (args.getOrNull(1) as? Boolean) == true
+                ReadiumReader.setLcpPassphrase(passphrase, preserveDrmScheme = preserveDrmScheme)
+                return Try.success(null)
+            }
+
+            "setDrmConfiguration" -> {
+                @Suppress("UNCHECKED_CAST")
+                val map = arguments as? Map<String, Any?> ?: emptyMap()
+                val scheme = (map["scheme"] as? Number)?.toInt() ?: 0
+                val passphrase = map["passphrase"] as? String
+                Log.d(TAG, "setDrmConfiguration branch: scheme=$scheme passphrase=${passphrase != null}")
+                ReadiumReader.setDrmConfiguration(scheme, passphrase)
                 return Try.success(null)
             }
 
@@ -242,9 +265,40 @@ internal class PublicationMethodCallHandler() :
             }
 
             else -> {
+                Log.w(
+                    TAG,
+                    "handleMethodCallsQueue: no branch for method=[$method] len=${method.length} " +
+                        "(if this is setDrmConfiguration, the running APK does not include that branch — run flutter clean and full rebuild)",
+                )
                 throw NotImplementedError()
             }
         }
+    }
+
+    /**
+     * Serializes [publication.manifest] for the Flutter side.
+     *
+     * The native [EpubReaderFragment] uses [ReadiumReader.currentPublication], not this string.
+     * The full RWPM includes a `resources` array with every packaged asset; serializing and sending
+     * it over the MethodChannel can take a long time or effectively hang the reader on large EPUBs.
+     * Dart only needs metadata, reading order, TOC, and top-level links for UI helpers.
+     */
+    private fun publicationManifestJsonStringForFlutter(publication: Publication): String {
+        val full = publication.manifest
+        // `Manifest.toJSON()` inclui `resources` na árvore — construir esse JSONArray gigante
+        // bloqueia a UI mesmo antes de `remove`/`toString`. Usar cópia sem resources.
+        val slimManifest: Manifest = full.copy(
+            resources = emptyList(),
+            subcollections = emptyMap(),
+        )
+        val json = slimManifest.toJSON()
+        val slim = json.toString().replace("\\/", "/")
+        Log.d(
+            TAG,
+            "manifestForFlutter: readingOrder=${full.readingOrder.size} " +
+                "resourcesOmitted=${full.resources.size} slimJsonChars=${slim.length}",
+        )
+        return slim
     }
 
     /**
@@ -256,8 +310,7 @@ internal class PublicationMethodCallHandler() :
                 return Try.failure(error)
             }
 
-        val pubJsonManifest =
-            publication.manifest.toJSON().toString().replace("\\/", "/")
+        val pubJsonManifest = publicationManifestJsonStringForFlutter(publication)
 
         // Close the publication to avoid leaks.
         publication.close()
@@ -275,8 +328,7 @@ internal class PublicationMethodCallHandler() :
                 return Try.failure(error)
             }
 
-        val pubJsonManifest =
-            publication.manifest.toJSON().toString().replace("\\/", "/")
+        val pubJsonManifest = publicationManifestJsonStringForFlutter(publication)
 
         return Try.success(pubJsonManifest)
     }
@@ -371,9 +423,21 @@ fun MethodChannel.Result.publicationError(method: String, error: PublicationErro
         "$method: PublicationError<${error.errorCode}>: ${error.message}, cause=${error.cause}"
     )
 
+    // StandardMessageCodec only accepts null, bool, int, double, String, Uint8List, List, Map.
+    // Readium [Error] / [ReadError] instances are not encodable — stringify to avoid crashing the app.
+    val details: String? =
+        error.cause?.let { c ->
+            when (c) {
+                is Throwable ->
+                    "${c}\n${c.stackTraceToString()}"
+                else ->
+                    c.toString()
+            }.take(12_000)
+        }
+
     this.error(
         error.errorCode.name,
         error.message,
-        error.cause
+        details,
     )
 }

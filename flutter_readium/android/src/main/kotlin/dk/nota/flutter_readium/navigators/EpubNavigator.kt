@@ -254,8 +254,9 @@ class EpubNavigator : BaseNavigator, EpubReaderFragment.Listener {
         if (hasNotifiedIsReady) return
 
         hasNotifiedIsReady = true
-        visualListener.onVisualReaderIsReady()
+        // Garantir que o fluxo currentLocator existe antes do snapshot em onVisualReaderIsReady.
         setupNavigatorListeners()
+        visualListener.onVisualReaderIsReady()
     }
 
     override fun onPageChanged(

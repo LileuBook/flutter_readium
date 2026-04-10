@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import androidx.fragment.app.FragmentManager
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryOwner
+import dk.nota.flutter_readium.altoral.AltoralContentProtection
 import dk.nota.flutter_readium.events.ReadiumErrorEventChannel
 import dk.nota.flutter_readium.events.ReadiumReaderStatus
 import dk.nota.flutter_readium.events.ReadiumReaderStatusEventChannel
@@ -36,6 +37,7 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.readium.navigator.media.tts.android.AndroidTtsEngine
 import org.readium.navigator.media.tts.android.AndroidTtsPreferences
 import org.readium.navigator.media.tts.android.AndroidTtsSettings
@@ -64,6 +66,7 @@ import org.readium.r2.shared.util.asset.AssetRetriever
 import org.readium.r2.shared.util.getOrElse
 import org.readium.r2.shared.util.http.DefaultHttpClient
 import org.readium.r2.shared.util.http.HttpRequest
+import org.readium.r2.shared.util.http.HttpResponse
 import org.readium.r2.shared.util.http.HttpTry
 import org.readium.r2.shared.util.resource.Resource
 import org.readium.r2.shared.util.resource.TransformingContainer
@@ -73,8 +76,12 @@ import org.readium.r2.lcp.auth.LcpPassphraseAuthentication
 import org.readium.r2.streamer.PublicationOpener
 import org.readium.r2.streamer.PublicationOpener.OpenError
 import org.readium.r2.streamer.parser.DefaultPublicationParser
+import java.io.File
 import java.lang.ref.WeakReference
+import java.net.HttpURLConnection
+import java.net.URL
 import java.security.MessageDigest
+import java.util.Locale
 import org.json.JSONObject
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -94,6 +101,27 @@ private const val audioNavigatorStateKey = "audioState"
 private const val syncAudioNavigatorStateKey = "syncAudioState"
 private const val epubNavigatorStateKey = "epubState"
 private const val decorationStyleKey = "decorationStyle"
+
+private val redirectHopHeaderBlocklist =
+    setOf(
+        "host",
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "proxy-authorization",
+        "te",
+        "trailers",
+        "transfer-encoding",
+        "upgrade",
+        "content-length",
+    )
+
+/** Mirrors Dart [DrmScheme] indices. */
+internal enum class FlutterDrmScheme {
+    LCP,
+    ALTORAL,
+    DUAL,
+}
 
 // TODO: Support custom headers and authentication header for content files.
 
@@ -168,6 +196,25 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                 }
                 return Try.success(requestWithHeaders)
             }
+
+            override suspend fun onFollowUnsafeRedirect(
+                request: HttpRequest,
+                response: HttpResponse,
+                newRequest: HttpRequest,
+            ): HttpTry<HttpRequest> {
+                val merged =
+                    newRequest.copy {
+                        request.headers.forEach { (key, values) ->
+                            val k = key.lowercase(Locale.ROOT)
+                            if (k in redirectHopHeaderBlocklist || k == "cookie") {
+                                return@forEach
+                            }
+                            values.forEach { addHeader(key, it) }
+                        }
+                    }
+                Log.d(TAG, "HTTP unsafe redirect: ${request.url} -> ${merged.url}")
+                return Try.success(merged)
+            }
         })
     }
 
@@ -183,6 +230,8 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         }
 
     private var _lcpPassphrase: String? = null
+
+    private var drmScheme: FlutterDrmScheme = FlutterDrmScheme.LCP
 
     private var _publicationOpener: PublicationOpener? = null
 
@@ -202,10 +251,35 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     val audioPreferences: FlutterAudioPreferences
         get() = _audioPreferences
 
-    fun setLcpPassphrase(passphrase: String) {
+    fun setLcpPassphrase(passphrase: String, preserveDrmScheme: Boolean = false) {
         _lcpPassphrase = passphrase
+        if (!preserveDrmScheme) {
+            drmScheme = FlutterDrmScheme.LCP
+        }
         _publicationOpener = null
-        Log.d(TAG, "LCP: passphrase updated (len=${passphrase.length}, fp=${fingerprint(passphrase)})")
+        Log.d(
+            TAG,
+            "LCP: passphrase updated (len=${passphrase.length}, fp=${fingerprint(passphrase)}" +
+                (if (preserveDrmScheme) ", preserveDrmScheme=true drmScheme=$drmScheme" else "") +
+                ")",
+        )
+    }
+
+    fun setDrmConfiguration(
+        schemeOrdinal: Int,
+        passphrase: String?,
+    ) {
+        drmScheme =
+            when (schemeOrdinal) {
+                1 -> FlutterDrmScheme.ALTORAL
+                2 -> FlutterDrmScheme.DUAL
+                else -> FlutterDrmScheme.LCP
+            }
+        if (passphrase != null) {
+            _lcpPassphrase = passphrase
+        }
+        _publicationOpener = null
+        Log.d(TAG, "DRM: scheme=$drmScheme passphrase=${if (passphrase != null) "set" else "unchanged"}")
     }
 
     private fun fingerprint(value: String): String {
@@ -221,8 +295,15 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             if (_publicationOpener == null) {
                 val contentProtections = buildList {
                     val passphrase = _lcpPassphrase
-                    Log.d(TAG, "LCP: building content protections, passphrase=${if (passphrase != null) "set (${passphrase.length} chars)" else "null"}")
-                    if (passphrase != null) {
+                    fun addLcpProtection() {
+                        Log.d(
+                            TAG,
+                            "LCP: building content protection, passphrase=${if (passphrase != null) "set (${passphrase.length} chars)" else "null"}",
+                        )
+                        if (passphrase == null) {
+                            Log.w(TAG, "LCP: no passphrase set, skipping LCP content protection")
+                            return
+                        }
                         try {
                             val lcpService = LcpService(
                                 context = context,
@@ -243,11 +324,36 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                         } catch (e: Exception) {
                             Log.w(TAG, "LCP: Failed to create content protection: $e")
                         }
-                    } else {
-                        Log.w(TAG, "LCP: no passphrase set, skipping LCP content protection")
+                    }
+                    when (drmScheme) {
+                        FlutterDrmScheme.LCP -> addLcpProtection()
+                        FlutterDrmScheme.ALTORAL -> {
+                            add(
+                                AltoralContentProtection(
+                                    assetRetriever,
+                                    acceptReadiumBasicProfileAsAltoral = true,
+                                    eagerHttpPublicationDownloader = {
+                                        downloadAltoralPublicationPreservingAuthAcrossRedirects(it)
+                                    },
+                                ),
+                            )
+                            Log.d(TAG, "Altoral: ContentProtection registered (basic-profile OK)")
+                        }
+                        FlutterDrmScheme.DUAL -> {
+                            add(
+                                AltoralContentProtection(
+                                    assetRetriever,
+                                    acceptReadiumBasicProfileAsAltoral = false,
+                                    eagerHttpPublicationDownloader = {
+                                        downloadAltoralPublicationPreservingAuthAcrossRedirects(it)
+                                    },
+                                ),
+                            )
+                            addLcpProtection()
+                        }
                     }
                 }
-                Log.d(TAG, "LCP: contentProtections count = ${contentProtections.size}")
+                Log.d(TAG, "DRM: contentProtections count = ${contentProtections.size}")
                 _publicationOpener = PublicationOpener(
                     publicationParser = DefaultPublicationParser(
                         context,
@@ -478,17 +584,78 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         defaultHttpHeaders.putAll(headers)
     }
 
+    /**
+     * Fetches the encrypted EPUB with [HttpURLConnection.setInstanceFollowRedirects] disabled and
+     * re-sends [defaultHttpHeaders] on every redirect hop. JDK auto-follow drops `Authorization` on
+     * cross-origin redirects, which breaks LCP publication links that bounce via CDN/storage.
+     */
+    private suspend fun downloadAltoralPublicationPreservingAuthAcrossRedirects(url: AbsoluteUrl): File {
+        val sessionHeaders = defaultHttpHeaders.toMap()
+        return withContext(Dispatchers.IO) {
+            var current = URL(url.toString())
+            repeat(16) {
+                val conn =
+                    (current.openConnection() as HttpURLConnection).apply {
+                        instanceFollowRedirects = false
+                        requestMethod = "GET"
+                        sessionHeaders.forEach { (k, v) -> setRequestProperty(k, v) }
+                        connectTimeout = 30_000
+                        readTimeout = 120_000
+                    }
+                val code =
+                    try {
+                        conn.responseCode
+                    } catch (e: Exception) {
+                        conn.disconnect()
+                        throw e
+                    }
+                when {
+                    code in 300..399 -> {
+                        val loc = conn.getHeaderField("Location")
+                        conn.disconnect()
+                        if (loc.isNullOrBlank()) {
+                            throw java.io.IOException("HTTP $code redirect without Location")
+                        }
+                        current = URL(conn.url, loc)
+                    }
+                    code >= 400 -> {
+                        val snippet =
+                            conn.errorStream?.use { stream -> stream.readBytes() }
+                                ?.decodeToString()
+                                ?.take(400)
+                        conn.disconnect()
+                        throw java.io.IOException("HTTP $code ${conn.responseMessage}: $snippet")
+                    }
+                    else -> {
+                        val out = File.createTempFile("altoral_pub_", ".epub", context.cacheDir)
+                        conn.inputStream.use { input ->
+                            out.outputStream().use { input.copyTo(it) }
+                        }
+                        conn.disconnect()
+                        return@withContext out
+                    }
+                }
+            }
+            throw java.io.IOException("Too many HTTP redirects")
+        }
+    }
+
     private suspend fun assetToPublication(
         asset: Asset
     ): Try<Publication, OpenError> {
         val publication: Publication =
-            publicationOpener.open(asset, allowUserInteraction = true, onCreatePublication = {
+            publicationOpener.open(
+                asset,
+                credentials = _lcpPassphrase,
+                allowUserInteraction = true,
+                onCreatePublication = {
                 val tocIds = manifest.tableOfContents.flattenChildren()
                     .mapNotNull { it.href.resolve().fragment }
                 container = TransformingContainer(container) { _: Url, resource: Resource ->
                     resource.injectScriptsAndStyles(tocIds)
                 }
-            }).getOrElse { err: OpenError ->
+            },
+            ).getOrElse { err: OpenError ->
                 Log.e(TAG, "Error opening publication: $err")
                 asset.close()
                 return failure(err)
@@ -564,6 +731,24 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     /**
+     * Opens a standalone Altoral license file (same extension `.lcpl` may be used) via [AltoralContentProtection]
+     * without LCP acquisition / injection.
+     */
+    private suspend fun openAltoralLicenseAt(lcplUrl: AbsoluteUrl): Try<Publication, PublicationError> {
+        val asset: Asset =
+            assetRetriever.retrieve(lcplUrl).getOrElse { error: AssetRetriever.RetrieveUrlError ->
+                Log.e(TAG, "openAltoralLicenseAt: retrieve failed: $error")
+                return failure(PublicationError.invoke(error))
+            }
+        val pub =
+            assetToPublication(asset).getOrElse { error ->
+                Log.e(TAG, "openAltoralLicenseAt: open failed: $error")
+                return failure(PublicationError.invoke(error))
+            }
+        return Try.success(pub)
+    }
+
+    /**
      * Load a publication from an AbsoluteUrl
      *
      * Note: Remember to close the publication to avoid leaks.
@@ -580,9 +765,29 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
         return withContext(Dispatchers.IO) {
             try {
-                // LCP License Documents must be acquired before opening
                 if (pubUrl.toString().endsWith(".lcpl", ignoreCase = true)) {
-                    return@withContext acquireAndLoadLcpl(pubUrl)
+                    return@withContext when (drmScheme) {
+                        FlutterDrmScheme.LCP -> acquireAndLoadLcpl(pubUrl)
+                        FlutterDrmScheme.ALTORAL -> openAltoralLicenseAt(pubUrl)
+                        FlutterDrmScheme.DUAL -> {
+                            val lcplPath =
+                                android.net.Uri.parse(pubUrl.toString()).path
+                                    ?: return@withContext failure(
+                                        PublicationError.Unexpected(DebugError("Invalid lcpl path: $pubUrl")),
+                                    )
+                            val text =
+                                try {
+                                    File(lcplPath).readText(Charsets.UTF_8)
+                                } catch (e: Exception) {
+                                    return@withContext failure(PublicationError.Unexpected(ThrowableError(e)))
+                                }
+                            if (AltoralContentProtection.isAltoralLicenseJson(text)) {
+                                openAltoralLicenseAt(pubUrl)
+                            } else {
+                                acquireAndLoadLcpl(pubUrl)
+                            }
+                        }
+                    }
                 }
 
                 // TODO: should client provide mediaType to assetRetriever?
@@ -643,7 +848,13 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
         val pub = loadPublication(pubUrl).getOrElse { e -> return failure(e) }
 
-        if (isPublicationRestricted(pub) || isPublicationRestrictedByProbe(pub)) {
+        // Altoral/basic-profile: o primeiro `read()` do spine pode bloquear indefinidamente após um
+        // open bem-sucedido (LcpBasicProfile já validou a passphrase). A sonda impedia o retorno ao
+        // Dart — MethodChannel nunca recebia o manifesto e o ecrã ficava no loading.
+        val decryptProbeFailed =
+            drmScheme != FlutterDrmScheme.ALTORAL && isPublicationRestrictedByProbe(pub)
+
+        if (isPublicationRestricted(pub) || decryptProbeFailed) {
             val message =
                 "The provided publication is restricted. Check that any DRM was properly unlocked using a Content Protection."
             Log.e(TAG, "openPublication: $message")
@@ -776,9 +987,23 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     private suspend fun isPublicationRestrictedByProbe(publication: Publication): Boolean {
+        return withTimeoutOrNull(10_000L) {
+            isPublicationRestrictedByProbeBody(publication)
+        } ?: run {
+            Log.w(
+                TAG,
+                "openPublication: restricted probe timed out after 10s — treating as unlocked " +
+                    "(LCP/network/decrypt pipeline may be slow; navigator will surface real errors).",
+            )
+            false
+        }
+    }
+
+    private suspend fun isPublicationRestrictedByProbeBody(publication: Publication): Boolean {
         val firstReadingOrderLink = publication.readingOrder.firstOrNull() ?: return false
 
         return try {
+            Log.d(TAG, "openPublication: running restricted decrypt probe (first spine byte)")
             val firstResource = publication.get(firstReadingOrderLink) ?: run {
                 Log.e(TAG, "openPublication: restricted probe missing first reading-order resource")
                 return true
@@ -1181,6 +1406,10 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     fun epubUpdatePreferences(preferences: EpubPreferences) {
         epubNavigator?.updatePreferences(preferences)
     }
+
+    /** Snapshot do locator atual (ex.: sincronizar Flutter em `onVisualReaderIsReady`). */
+    fun epubCurrentLocatorSnapshot(): Locator? =
+        epubNavigator?.currentLocator?.value
 
     /**
      * Navigate backward in the EPUB navigator.

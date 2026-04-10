@@ -336,4 +336,18 @@ class FlutterReadiumWebPlugin extends FlutterReadiumPlatform {
   Stream<ReadiumError> get onErrorEvent {
     throw UnimplementedError('get onErrorEvent is not implemented on web platform');
   }
+
+  @override
+  Future<void> setLcpPassphrase(String passphrase) async {
+    R2Log.d('setLcpPassphrase is not implemented on web platform');
+  }
+
+  @override
+  Future<void> setDrmConfiguration({
+    required DrmScheme scheme,
+    String? passphrase,
+    Map<String, String>? extras,
+  }) async {
+    R2Log.d('setDrmConfiguration is not implemented on web platform');
+  }
 }

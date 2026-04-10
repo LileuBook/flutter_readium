@@ -30,6 +30,19 @@ class FlutterReadium {
     return _platform.setLcpPassphrase(passphrase);
   }
 
+  /// Configures native DRM: [DrmScheme.lcp], [DrmScheme.altoral], or [DrmScheme.dual].
+  Future<void> setDrmConfiguration({
+    required DrmScheme scheme,
+    String? passphrase,
+    Map<String, String>? extras,
+  }) {
+    return _platform.setDrmConfiguration(
+      scheme: scheme,
+      passphrase: passphrase,
+      extras: extras,
+    );
+  }
+
   Future<void> setLogLevel(LogLevel level) {
     return _platform.setLogLevel(level);
   }

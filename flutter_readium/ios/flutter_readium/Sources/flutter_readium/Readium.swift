@@ -28,9 +28,11 @@ final class Readium : DefaultHTTPClientDelegate {
   lazy var httpServer: HTTPServer? = nil
   lazy var formatSniffer: FormatSniffer = DefaultFormatSniffer()
   lazy var assetRetriever: AssetRetriever? = nil
-  lazy var publicationOpener: PublicationOpener? = nil
+  var publicationOpener: PublicationOpener? = nil
   var additionalHeaders = Dictionary<String, String>()
   var lcpPassphrase: String? = nil
+  /// 0 = LCP, 1 = Altoral, 2 = dual (Altoral then LCP). Mirrors Dart [DrmScheme].
+  var drmScheme: Int = 0
 
   func setupWithHeaders(headers: [String: String]?) {
     self.httpClient = DefaultHTTPClient(
@@ -41,23 +43,79 @@ final class Readium : DefaultHTTPClientDelegate {
         delegate: self)
     self.assetRetriever = AssetRetriever(httpClient: self.httpClient!)
     self.httpServer = GCDHTTPServer(assetRetriever: self.assetRetriever!)
+    rebuildPublicationOpener()
+  }
+
+  func rebuildPublicationOpener() {
+    guard let httpClient, let assetRetriever else { return }
     self.publicationOpener = PublicationOpener(
       parser: DefaultPublicationParser(
-        httpClient: httpClient!,
-        assetRetriever: assetRetriever!,
+        httpClient: httpClient,
+        assetRetriever: assetRetriever,
         pdfFactory: DefaultPDFDocumentFactory()
       ),
-      contentProtections: contentProtections,
+      contentProtections: buildContentProtections(),
     )
   }
+
+  func buildContentProtections() -> [ContentProtection] {
+    var list: [ContentProtection] = []
+    #if LCP
+    if drmScheme == 1 || drmScheme == 2, let ar = assetRetriever {
+      let relaxedBasic = (drmScheme == 1)
+      list.append(
+        AltoralContentProtection(
+          assetRetriever: ar,
+          acceptReadiumBasicProfileAsAltoral: relaxedBasic
+        ))
+    }
+    if drmScheme == 0 || drmScheme == 2 {
+      list.append(lcpService.contentProtection(with: makeLcpAuth()))
+    }
+    #else
+    if drmScheme == 1 || drmScheme == 2, let ar = assetRetriever {
+      let relaxedBasic = (drmScheme == 1)
+      list.append(
+        AltoralContentProtection(
+          assetRetriever: ar,
+          acceptReadiumBasicProfileAsAltoral: relaxedBasic
+        ))
+    }
+    #endif
+    return list
+  }
+
+  #if LCP
+  func makeLcpAuth() -> LCPAuthenticating {
+    if let p = lcpPassphrase, !p.isEmpty {
+      return LCPPassphraseAuthentication(p, fallback: LCPDialogAuthentication())
+    }
+    return LCPDialogAuthentication()
+  }
+  #endif
 
   func setAdditionalHeaders(_ headers: [String: String]) -> Void {
     self.additionalHeaders = headers
   }
 
-  func setLcpPassphrase(_ passphrase: String) -> Void {
+  func setLcpPassphrase(_ passphrase: String, preserveDrmScheme: Bool = false) -> Void {
+    if !preserveDrmScheme {
+      self.drmScheme = 0
+    }
     self.lcpPassphrase = passphrase
-    Log.readium.debug("LCP passphrase set (len=\(passphrase.count))")
+    rebuildPublicationOpener()
+    Log.readium.debug(
+      "LCP passphrase set (len=\(passphrase.count)\(preserveDrmScheme ? ", preserveDrmScheme=true drmScheme=\(drmScheme)" : ""))"
+    )
+  }
+
+  func setDrmConfiguration(scheme: Int, passphrase: String?) -> Void {
+    drmScheme = scheme
+    if let p = passphrase {
+      lcpPassphrase = p
+    }
+    rebuildPublicationOpener()
+    Log.readium.debug("DRM scheme=\(scheme) passphrase=\(passphrase != nil ? "set" : "unchanged")")
   }
 
   //--- MARK: DefaultHTTPClientDelegate
@@ -79,14 +137,7 @@ final class Readium : DefaultHTTPClientDelegate {
 
   //--- MARK: LCP
 
-#if !LCP
-  let contentProtections: [ContentProtection] = []
-
-#else
-  lazy var contentProtections: [ContentProtection] = [
-    lcpService.contentProtection(with: lcpAuthentication),
-  ]
-
+#if LCP
   lazy var lcpService = LCPService(
     client: LCPClient(),
     licenseRepository: try! LCPSQLiteLicenseRepository(),
@@ -94,8 +145,6 @@ final class Readium : DefaultHTTPClientDelegate {
     assetRetriever: assetRetriever,
     httpClient: httpClient
   )
-
-  lazy var lcpAuthentication: LCPAuthenticating = LCPDialogAuthentication()
 
   /// Facade to the private R2LCPClient.framework.
   class LCPClient: ReadiumLCP.LCPClient {

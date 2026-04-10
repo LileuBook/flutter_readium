@@ -106,6 +106,9 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
         ? widget.goBackwardSemanticLabel
         : widget.goForwardSemanticLabel;
 
+    // Ordem do Stack: overlays de semântica primeiro; o leitor por último.
+    // Com o leitor por baixo da camada Positioned.fill de toggle, o WebView deixava de receber toques
+    // (ecrã em branco / sem interação). Positioned.fill no leitor mantém constraints máximas.
     return Stack(
       children: [
         Positioned(
@@ -128,42 +131,44 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
           bottom: 0,
           child: _buildSemanticsPrevNextPage(label: rightDownLabel, toNextPage: true),
         ),
-        ExcludeSemantics(
-          child: Listener(
-            onPointerDown: (final _) {
-              _enableWakelock();
-            },
-            onPointerMove: (final event) {
-              if (userSwipe) {
-                return;
-              }
-
-              userSwipe = event.delta.distance > 3.0;
-
-              if (userSwipe) {
-                _onInteraction();
-              }
-            },
-            onPointerUp: (final event) async {
-              if (userSwipe) {
-                /// Wait for page animation to complete.
-                await Future.delayed(const Duration(seconds: 1));
-              } else {
-                final dx = event.position.dx;
-
-                if (dx < 70.0 || ((context.size?.width ?? 0) - dx) < 70.0) {
-                  // edge tap
-                  _onInteraction();
-                } else {
-                  // center tap
-                  _toggleControls();
+        Positioned.fill(
+          child: ExcludeSemantics(
+            child: Listener(
+              onPointerDown: (final _) {
+                _enableWakelock();
+              },
+              onPointerMove: (final event) {
+                if (userSwipe) {
+                  return;
                 }
-              }
 
-              userSwipe = false;
-            },
+                userSwipe = event.delta.distance > 3.0;
 
-            child: _readerWidget,
+                if (userSwipe) {
+                  _onInteraction();
+                }
+              },
+              onPointerUp: (final event) async {
+                if (userSwipe) {
+                  /// Wait for page animation to complete.
+                  await Future.delayed(const Duration(seconds: 1));
+                } else {
+                  final dx = event.position.dx;
+
+                  if (dx < 70.0 || ((context.size?.width ?? 0) - dx) < 70.0) {
+                    // edge tap
+                    _onInteraction();
+                  } else {
+                    // center tap
+                    _toggleControls();
+                  }
+                }
+
+                userSwipe = false;
+              },
+
+              child: _readerWidget,
+            ),
           ),
         ),
       ],
@@ -289,8 +294,6 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
   }
 
   Future<void> _enableWakelock() async {
-    R2Log.d('Ensure wakelock /w timer');
-
     WakelockPlus.enable();
 
     // Disable wakelock after 30 minutes of inactivity (no interaction with reader).
